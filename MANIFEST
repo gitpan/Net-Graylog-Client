@@ -1,0 +1,10 @@
+Changes
+LICENSE
+MANIFEST
+META.yml
+Makefile.PL
+README
+bin/graylog
+dist.ini
+lib/Net/Graylog/Client.pm
+t/client.t

@@ -1,0 +1,167 @@
+#!/usr/bin/env perl
+# PODNAME: graylog 
+# ABSTRACT: send data to a Graylog server
+# sending using the HTTP interface, we send json!
+# the port is the one setup in the graylog web UI for that a GELF HTTP input
+
+# curl -XPOST http://graylog2_server:12202/gelf -p0 -d '{"short_message":"Hello there", "host":"example.org", "facility":"test", "_foo":"bar"}'
+
+# (c) kevin Mulholland 2014, moodfarm@cpan.org
+# this code is released under the Perl Artistic License
+# extra info at http://support.torch.sh/help/kb/graylog2-server/using-the-gelf-http-input
+
+use strict;
+use warnings;
+use POSIX qw( strftime) ;
+use Data::Printer;
+
+use App::Basis;
+use Net::Graylog::Client qw( valid_levels valid_facilities);
+
+# -----------------------------------------------------------------------------
+
+my @msg_levels = qw( emerg  alert crit error warning notice info debug);
+
+# these are the various graylog servers/ports that we can send data to
+my %targets = ( local => 'http://local:12202/gelf', );
+
+# -----------------------------------------------------------------------------
+sub basic_debug {
+    my ($debug) = @_;
+
+    print strftime( '%Y-%m-%d %H:%M:%S', gmtime( time() ) ) . " " . get_program() . " " . "$debug\n";
+}
+
+# -----------------------------------------------------------------------------
+# remove leading and trailing spaces
+sub trim {
+    my ($str) = @_;
+
+    $str =~ s/^\s+//gsm;
+    $str =~ s/\s+$//gsm;
+
+    return $str;
+}
+
+# -----------------------------------------------------------------------------
+# find the keyvalue pairs in a string, return a hash of them
+# keys and values separated by ':' or '='
+sub parse_keyvalues {
+    my ($str) = @_;
+    my %data;
+
+    $str =~ s/\b(\w+[:=])/|$1/g;
+    $str =~ s/^\|//;
+    my @things = split( /\|/, $str );
+
+    foreach my $d (@things) {
+        my ( $k, $v ) = split( /[:=]/, $d );
+
+        # remove any enclosing quotes
+        # $v =~ s/^['"](.*?)['"]$/$1/;
+        $data{$k} = trim($v);
+    }
+
+    return %data;
+}
+
+# -----------------------------------------------------------------------------
+# main
+
+my $program = get_program();
+
+# process the command line options
+my %opt = init_app(
+    help_text    => "Send messages to a graylog server",
+    help_cmdline => "[optional] key:value pairs='of information'",
+    options      => {
+        'verbose|v'    => 'Dump extra useful information',
+        'level|l=s'    => { desc => 'Syslog severity level one of ' . join( ', ', valid_levels() ), },
+        'facility|f=s' => { desc => 'Syslog facility level one of ' . join( ', ', valid_facilities() ), },
+        'logger=s'     => {
+            desc    => 'The name of the logger to report',
+            default => get_program()
+        },
+        'server=s' => {
+            desc => 'The name of the server to report this message came from',
+        },
+        'target=s' => {
+            desc     => 'target to send messages to [' . join( ', ', keys %targets) . "] or use url",
+            validate => sub {
+                my $val = lc(shift);
+                # either use one of out built in targets as a shortcut
+                # or 
+                return $val =~ m|^https?://| || $targets{$val};
+            },
+            default => 'local'
+        },
+        'message|m=s' => { desc => 'The message to send', required => 1 }
+    }
+);
+
+set_debug( \&basic_debug );
+debug("Started");
+
+if ( defined $opt{level} ) {
+    show_usage("Invalid level") if ( !grep ( $opt{level}, valid_levels ) );
+}
+
+if ( defined $opt{facility} ) {
+    show_usage("Invalid facility") if ( !grep ( $opt{facility}, valid_facilities ) );
+}
+
+my $verbose = $opt{verbose};
+
+# -----------------------------------------------------------------------------
+# ready to build the message to send
+
+my $url = $opt{target} =~ m|https?://| ? $opt{target} : $targets{ $opt{target} } ;
+my $graylog = Net::Graylog::Client->new( url => $url );
+
+# init the msg block with any colon separated key value pairs
+my %msg = parse_keyvalues( join( ' ', @ARGV ) );
+
+# overwrite any things in the optional extra data, with
+# parameters passed as options
+map { $msg{$_} = $opt{$_}; } keys %opt;
+
+# remove some fields the options left behind
+map { delete $msg{$_} } qw( target verbose);
+
+my ( $s, $code ) = $graylog->send(%msg);
+
+$s = $s ? 'Sent' : 'Failed';
+print "$s, $code\n" if ($verbose);
+debug("msg $s");
+
+# -----------------------------------------------------------------------------
+# all done
+
+exit !$s;
+
+__END__
+
+=pod
+
+=encoding UTF-8
+
+=head1 NAME
+
+graylog  - send data to a Graylog server
+
+=head1 VERSION
+
+version 0.1
+
+=head1 AUTHOR
+
+Kevin Mulholland <moodfarm@cpan.org>
+
+=head1 COPYRIGHT AND LICENSE
+
+This software is copyright (c) 2014 by Kevin Mulholland.
+
+This is free software; you can redistribute it and/or modify it under
+the same terms as the Perl 5 programming language system itself.
+
+=cut
