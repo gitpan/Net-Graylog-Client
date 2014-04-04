@@ -2,6 +2,9 @@
 
 
 package Net::Graylog::Client;
+{
+  $Net::Graylog::Client::VERSION = '0.3';
+}
 
 use strict;
 use warnings;
@@ -12,7 +15,10 @@ use JSON::Tiny;
 use Sys::Hostname;
 use Data::UUID;
 use POSIX qw(strftime);
-use Mo qw( default is required );    # not using (build builder coerce)
+use App::Basis;
+
+# use Mo qw( default is required );    # not using (build builder coerce)
+use Moo;
 use namespace::clean;
 
 use vars qw( @EXPORT @ISA);
@@ -28,6 +34,8 @@ use vars qw( @EXPORT @ISA);
     valid_facilities
 );
 
+use constant GELF_VERSION => "1.1";
+
 # -----------------------------------------------------------------------------
 
 
@@ -35,6 +43,29 @@ use vars qw( @EXPORT @ISA);
 has url       => ( is => 'ro', required => 1 );
 has _uuid     => ( is => 'ro', init_arg => undef, default => sub { Data::UUID->new() }, );
 has _hostname => ( is => 'ro', init_arg => undef, default => sub { hostname(); } );
+has timeout => ( is => 'ro', default => sub { 0.01; } );
+
+# we need to set a timeout for the connection as Furl seems to wait
+# for this time to elapse before giving us any response. If the default is used
+# 180s then this will block for 3 minutes! crazy stuff, so I set it to 0.01
+# which would allow me to send 100 messages/sec, which should be OK for my
+# purposes especially as my graylog is on the local network
+has _furl => (
+    is      => 'lazy',
+    default => sub {
+        my $self = shift;
+        return Furl->new(
+            agent => __PACKAGE__,
+
+            # headers => [
+            #     'Accept'        => 'application/json',
+            #     'content-type'  => 'application/json',
+            # ],
+            timeout => $self->timeout,
+        );
+    },
+    init_arg => undef,
+);
 
 # -----------------------------------------------------------------------------
 
@@ -64,15 +95,18 @@ sub send {
     # we add these fields so, we will report issues if they are passed
     # for some reason graylog accepts a message with a count field
     # but then silently discards it!
-    map { die "Field '$_' not allowed" if ( $data{$_} ) } qw( uuid datetime timestr count);
+    map { die "Field '$_' not allowed" if ( $data{$_} ) } qw( uuid timestamp  timestr count);
 
     die "message field is required" if ( !$data{message} );
 
+    $data{version}       = GELF_VERSION;
     $data{short_message} = $data{message};
+    $data{full_message}  = $data{long} || $data{full_message};
     $data{uuid}          = $self->_uuid->create_str();
-    $data{datetime}      = time();
+    $data{timestamp}     = time();
     $data{timestr}       = strftime( "%Y-%m-%d %H:%M:%S", gmtime( time() ) );
     $data{host}          = $data{server} || $data{host} || hostname();
+    $data{logger} ||= get_program();
 
     # convert the level to match a syslog level and stop graylog fretting
     if ( defined $data{level} && $data{level} !~ /^\d+$/ ) {
@@ -91,10 +125,20 @@ sub send {
     }
 
     # remove some entries we dont want
-    map { delete $data{$_} if ( exists $data{$_} ); } qw( server message);
+    map { delete $data{$_} if ( exists $data{$_} ); } qw( server message long);
+
+    # rename things that are not allowed fields
+    my %allowed = map { $_ => 1 } qw(uuid timestamp host version timestr full_message short_message level facility file);
+    foreach my $k ( keys %data ) {
+        if ( !$allowed{$k} ) {
+
+            # prefix with an underline and then remove original
+            $data{"_$k"} = $data{$k};
+            delete $data{$k};
+        }
+    }
 
     # convert any floats into strings
-
     # foreach my $k ( keys %data) {
     #     # floating point numbers need to be made into strings
     #     if( $data{$k} =~ /^[0-9]{1,}(\.[0-9]{1,})$/) {
@@ -103,12 +147,7 @@ sub send {
     # }
 
     my $json = JSON::Tiny->new();
-    my $furl = Furl->new(
-        agent   => __PACKAGE__,
-        timeout => 1,
-    );
-
-    my $status = $furl->post( $self->url, [ 'Content-Type' => ['application/json'] ], $json->encode( \%data ) );
+    my $status = $self->_furl->post( $self->url, [ 'Content-Type' => ['application/json'] ], $json->encode( \%data ) );
 
     return ( $status->is_success, $status->code );
 }
@@ -167,15 +206,15 @@ Net::Graylog::Client - Client for Graylog2 analysis server
 
 =head1 VERSION
 
-version 0.2
+version 0.3
 
 =head1 SYNOPSIS
 
   use Net::Graylog::Client ;
  
-  my $log = Net::Graylog::Client->new( 'http://graylog.server:12002/gelf' ) ;
+  my $log = Net::Graylog::Client->new( url => 'http://graylog.server:12002/gelf' ) ;
 
-  $log->send( message => 'testing', level =< 'debug') ;
+  $log->send( message => 'testing', level => 'debug') ;
 
 =head1 DESCRIPTION
 
@@ -211,7 +250,12 @@ curl -XPOST http://graylog2_server:12202/gelf -p0 -d '{"short_message":"Hello th
 
 =head1 See Also
 
- Log::Log4perl::Layout::GELF , Net::Sentry::Client
+L<Log::Log4perl::Layout::GELF> , L<Net::Sentry::Client>
+
+=head1 Todo
+
+Investigate L<HTTP::Async> instead of L<:Furl> as it will not block, so we can wait
+for the response to be received, rather than the timeout to lapse
 
 =head1 Public Functions
 
@@ -221,10 +265,13 @@ curl -XPOST http://graylog2_server:12202/gelf -p0 -d '{"short_message":"Hello th
 
 Create a new instance of the logger
 
-    my $log = Net::Graylog::Client->new( 'http://graylog2_server:12202/gelf') ;
+    my $log = Net::Graylog::Client->new( url => 'http://graylog2_server:12202/gelf') ;
 
 B<Parameters>
   url the url of the graylog server, of the form http://graylog2_server:12202/gelf
+  timeout, can be a float, default 0.01, Furl seems to wait until the timeout occurs 
+    before giving a response, which really cuts into the speed of sending, you may want to make this
+    bigger for non-local servers, ie 1s
 
 =item send
 
